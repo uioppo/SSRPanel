@@ -12,6 +12,7 @@ use App\Mail\activeUser;
 use Captcha;
 use Response;
 use Redirect;
+use Cache;
 use Mail;
 
 /**
@@ -32,6 +33,8 @@ class RegisterController extends Controller
     // 注册页
     public function index(Request $request)
     {
+        $cacheKey = 'register_times_' . md5($request->getClientIp()); // 注册限制缓存key
+
         if ($request->method() == 'POST') {
             $username = trim($request->get('username'));
             $password = trim($request->get('password'));
@@ -106,6 +109,18 @@ class RegisterController extends Controller
                 }
             }
 
+            // 24小时内同IP注册限制
+            if (self::$config['register_ip_limit']) {
+                if (Cache::has($cacheKey)) {
+                    $registerTimes = Cache::get($cacheKey);
+                    if ($registerTimes >= self::$config['register_ip_limit']) {
+                        $request->session()->flash('errorMsg', '系统已开启防刷机制，请勿频繁注册');
+
+                        return Redirect::back()->withInput($request->except(['code']));
+                    }
+                }
+            }
+
             // 校验用户名是否已存在
             $exists = User::query()->where('username', $username)->first();
             if ($exists) {
@@ -148,20 +163,29 @@ class RegisterController extends Controller
             $user->referral_uid = $referral_uid;
             $user->save();
 
-            // 初始化默认标签
-            if (count(self::$config['initial_labels_for_user']) > 0) {
-                $labels = explode(',', self::$config['initial_labels_for_user']);
-                foreach ($labels as $label) {
-                    $userLabel = new UserLabel();
-                    $userLabel->user_id = $user->id;
-                    $userLabel->label_id = $label;
-                    $userLabel->save();
+            if ($user->id) {
+                // 注册次数+1
+                if (Cache::has($cacheKey)) {
+                    Cache::increment($cacheKey);
+                } else {
+                    Cache::put($cacheKey, 1, 1440); // 24小时
                 }
-            }
 
-            // 更新邀请码
-            if (self::$config['is_invite_register'] && $user->id) {
-                Invite::query()->where('id', $code->id)->update(['fuid' => $user->id, 'status' => 1]);
+                // 初始化默认标签
+                if (strlen(self::$config['initial_labels_for_user'])) {
+                    $labels = explode(',', self::$config['initial_labels_for_user']);
+                    foreach ($labels as $label) {
+                        $userLabel = new UserLabel();
+                        $userLabel->user_id = $user->id;
+                        $userLabel->label_id = $label;
+                        $userLabel->save();
+                    }
+                }
+
+                // 更新邀请码
+                if (self::$config['is_invite_register']) {
+                    Invite::query()->where('id', $code->id)->update(['fuid' => $user->id, 'status' => 1]);
+                }
             }
 
             // 发送邮件
@@ -188,12 +212,27 @@ class RegisterController extends Controller
 
                 $request->session()->flash('regSuccessMsg', '注册成功：激活邮件已发送，请查看邮箱');
             } else {
+                // 如果不需要激活，则直接给推荐人加流量
+                if ($referral_uid) {
+                    $transfer_enable = self::$config['referral_traffic'] * 1048576;
+
+                    User::query()->where('id', $referral_uid)->increment('transfer_enable', $transfer_enable);
+                    User::query()->where('id', $referral_uid)->update(['enable' => 1]);
+                }
+
                 $request->session()->flash('regSuccessMsg', '注册成功');
             }
 
             return Redirect::to('login');
         } else {
             $request->session()->put('register_token', makeRandStr(16));
+
+            // 如果第一次打开带返aff，则存储aff，防止再次打开无返利aff
+            if (intval($request->get('aff'))) {
+                if (!$request->session()->get('register_aff')) {
+                    $request->session()->put('register_aff', intval($request->get('aff')));
+                }
+            }
 
             $view['is_captcha'] = self::$config['is_captcha'];
             $view['is_register'] = self::$config['is_register'];

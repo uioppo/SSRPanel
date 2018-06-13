@@ -58,7 +58,7 @@
             <div class="row">
                 <div class="col-xs-12" style="text-align: right;">
                     @if($is_youzan)
-                        <a class="btn btn-lg red hidden-print" onclick="onlinePay()"> 在线支付 </a>
+                        <a class="btn btn-lg red hidden-print" onclick="onlinePay()"> {{trans('home.online_pay')}} </a>
                     @endif
                     <a class="btn btn-lg blue hidden-print uppercase" onclick="pay()"> {{trans('home.service_pay_button')}} </a>
                 </div>
@@ -101,7 +101,7 @@
                         // 根据类型计算折扣后的总金额
                         var total_price = 0;
                         if (ret.data.type == '2') {
-                            total_price = goods_price * ret.data.discount;
+                            total_price = goods_price * ret.data.discount / 10;
                         } else {
                             total_price = goods_price - ret.data.amount;
                             total_price = total_price > 0 ? total_price : 0;

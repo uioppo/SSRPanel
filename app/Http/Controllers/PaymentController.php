@@ -53,7 +53,7 @@ class PaymentController extends Controller
             }
 
             // 计算实际应支付总价
-            $amount = $coupon->type == 2 ? $goods->price * $coupon->discount : $goods->price - $coupon->amount;
+            $amount = $coupon->type == 2 ? $goods->price * $coupon->discount / 10 : $goods->price - $coupon->amount;
             $amount = $amount > 0 ? $amount : 0;
         } else {
             $amount = $goods->price;
@@ -103,6 +103,7 @@ class PaymentController extends Controller
             $payment->qr_id = $result['response']['qr_id'];
             $payment->qr_url = $result['response']['qr_url'];
             $payment->qr_code = $result['response']['qr_code'];
+            $payment->qr_local_url = $this->base64ImageSaver($result['response']['qr_code']);
             $payment->status = 0;
             $payment->save();
 

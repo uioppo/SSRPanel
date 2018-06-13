@@ -15,4 +15,9 @@ class UserLabel extends Model
     protected $table = 'user_label';
     protected $primaryKey = 'id';
     public $timestamps = false;
+
+    function user()
+    {
+        return $this->hasOne(User::class, 'id', 'user_id');
+    }
 }

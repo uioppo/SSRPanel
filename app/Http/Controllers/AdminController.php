@@ -48,20 +48,40 @@ class AdminController extends Controller
     public function index(Request $request)
     {
         $past = strtotime(date('Y-m-d', strtotime("-" . self::$config['expire_days'] . " days")));
-        $online = time() - 600;
 
-        $view['userCount'] = User::query()->count();
-        $view['activeUserCount'] = User::query()->where('t', '>=', $past)->count();
-        $view['onlineUserCount'] = User::query()->where('t', '>=', $online)->count();
+        $view['expireDays'] = self::$config['expire_days'];
+        $view['totalUserCount'] = User::query()->count(); // 总用户数
+        $view['enableUserCount'] = User::query()->where('enable', 1)->count(); // 有效用户数
+        $view['activeUserCount'] = User::query()->where('t', '>=', $past)->count(); // 活跃用户数
+        $view['unActiveUserCount'] = User::query()->where('t', '<=', $past)->where('enable', 1)->count(); // 不活跃用户数
+        $view['onlineUserCount'] = User::query()->where('t', '>=', time() - 600)->count(); // 10分钟内在线用户数
+        $view['expireWarningUserCount'] = User::query()->where('expire_time', '<=', date('Y-m-d', strtotime("+" . self::$config['expire_days'] . " days")))->whereIn('status', [0, 1])->where('enable', 1)->count(); // 临近过期用户数
+        $view['largeTrafficUserCount'] = User::query()->whereRaw('(u + d) >= 107374182400')->whereIn('status', [0, 1])->count(); // 流量超过100G的用户
+
+        // 24小时内流量异常用户
+        $tempUsers = [];
+        $userTotalTrafficList = UserTrafficHourly::query()->where('node_id', 0)->where('total', '>', 104857600)->where('created_at', '>=', date('Y-m-d H:i:s', time() - 24 * 60 * 60))->groupBy('user_id')->selectRaw("user_id, sum(total) as totalTraffic")->get(); // 只统计100M以上的记录，加快速度
+        if (!$userTotalTrafficList->isEmpty()) {
+            foreach ($userTotalTrafficList as $vo) {
+                if ($vo->totalTraffic > (self::$config['traffic_ban_value'] * 1024 * 1024 * 1024)) {
+                    $tempUsers[] = $vo->user_id;
+                }
+            }
+        }
+        $view['flowAbnormalUserCount'] = User::query()->whereIn('id', $tempUsers)->count();
+
+
         $view['nodeCount'] = SsNode::query()->count();
+        $view['unnormalNodeCount'] = SsNode::query()->where('status', 0)->count();
+
         $flowCount = SsNodeTrafficDaily::query()->where('created_at', '>=', date('Y-m-d 00:00:00', strtotime("-30 days")))->sum('total');
         $view['flowCount'] = flowAutoShow($flowCount);
         $totalFlowCount = SsNodeTrafficDaily::query()->sum('total');
         $view['totalFlowCount'] = flowAutoShow($totalFlowCount);
+
         $view['totalBalance'] = User::query()->sum('balance') / 100;
         $view['totalWaitRefAmount'] = ReferralLog::query()->whereIn('status', [0, 1])->sum('ref_amount') / 100;
         $view['totalRefAmount'] = ReferralApply::query()->where('status', 2)->sum('amount') / 100;
-        $view['expireWarningUserCount'] = User::query()->where('expire_time', '<=', date('Y-m-d', strtotime("+" . self::$config['expire_days'] . " days")))->where('enable', 1)->count();
 
         return Response::view('admin/index', $view);
     }
@@ -76,7 +96,11 @@ class AdminController extends Controller
         $pay_way = $request->get('pay_way');
         $status = $request->get('status');
         $enable = $request->get('enable');
+        $online = $request->get('online');
+        $unActive = $request->get('unActive');
+        $flowAbnormal = $request->get('flowAbnormal');
         $expireWarning = $request->get('expireWarning');
+        $largeTraffic = $request->get('largeTraffic');
 
         $query = User::query();
         if (!empty($username)) {
@@ -107,12 +131,41 @@ class AdminController extends Controller
             $query->where('enable', intval($enable));
         }
 
-        // 临近过期提醒
-        if ($expireWarning) {
-            $query->where('expire_time', '<=', date('Y-m-d', strtotime("+15 days")));
+        // 流量超过100G的
+        if ($largeTraffic) {
+            $query->whereIn('status', [0, 1])->whereRaw('(u + d) >= 107374182400');
         }
 
-        $userList = $query->orderBy('enable', 'desc')->orderBy('status', 'desc')->orderBy('id', 'desc')->paginate(10)->appends($request->except('page'));
+        // 临近过期提醒
+        if ($expireWarning) {
+            $query->whereIn('status', [0, 1])->where('expire_time', '<=', date('Y-m-d', strtotime("+" . self::$config['expire_days'] . " days")));
+        }
+
+        // 当前在线
+        if ($online) {
+            $query->where('t', '>=', time() - 600);
+        }
+
+        // 不活跃用户
+        if ($unActive) {
+            $query->where('t', '<=', strtotime(date('Y-m-d', strtotime("-" . self::$config['expire_days'] . " days"))))->where('enable', 1);
+        }
+
+        // 24小时内流量异常用户
+        if ($flowAbnormal) {
+            $tempUsers = [];
+            $userTotalTrafficList = UserTrafficHourly::query()->where('node_id', 0)->where('total', '>', 104857600)->where('created_at', '>=', date('Y-m-d H:i:s', time() - 24 * 60 * 60))->groupBy('user_id')->selectRaw("user_id, sum(total) as totalTraffic")->get(); // 只统计100M以上的记录，加快速度
+            if (!$userTotalTrafficList->isEmpty()) {
+                foreach ($userTotalTrafficList as $vo) {
+                    if ($vo->totalTraffic > (self::$config['traffic_ban_value'] * 1024 * 1024 * 1024)) {
+                        $tempUsers[] = $vo->user_id;
+                    }
+                }
+            }
+            $query->whereIn('id', $tempUsers);
+        }
+
+        $userList = $query->orderBy('enable', 'desc')->orderBy('status', 'desc')->orderBy('id', 'desc')->paginate(15)->appends($request->except('page'));
         foreach ($userList as &$user) {
             $user->transfer_enable = flowAutoShow($user->transfer_enable);
             $user->used_flow = flowAutoShow($user->u + $user->d);
@@ -220,6 +273,9 @@ class AdminController extends Controller
                 $user->username = '批量生成-' . makeRandStr();
                 $user->password = md5(makeRandStr());
                 $user->enable = 1;
+                $user->method = $this->getDefaultMethod();
+                $user->protocol = $this->getDefaultProtocol();
+                $user->obfs = $this->getDefaultObfs();
                 $user->port = $port;
                 $user->passwd = makeRandStr();
                 $user->transfer_enable = toGB(1000);
@@ -323,7 +379,7 @@ class AdminController extends Controller
 
                 User::query()->where('id', $id)->update($data);
 
-                // 先删除所有该用户的标签
+                // 先删除该用户所有的标签
                 UserLabel::query()->where('user_id', $id)->delete();
 
                 // 生成用户标签
@@ -388,7 +444,15 @@ class AdminController extends Controller
     // 节点列表
     public function nodeList(Request $request)
     {
-        $nodeList = SsNode::query()->orderBy('status', 'desc')->orderBy('id', 'asc')->paginate(10)->appends($request->except('page'));
+        $status = $request->input('status');
+
+        $query = SsNode::query();
+
+        if ($status != '') {
+            $query->where('status', intval($status));
+        }
+
+        $nodeList = $query->orderBy('status', 'desc')->orderBy('id', 'asc')->paginate(15)->appends($request->except('page'));
         foreach ($nodeList as &$node) {
             // 在线人数
             $last_log_time = time() - 600; // 10分钟内
@@ -440,6 +504,7 @@ class AdminController extends Controller
                 $ssNode->bandwidth = $request->get('bandwidth', 100);
                 $ssNode->traffic = $request->get('traffic', 1000);
                 $ssNode->monitor_url = $request->get('monitor_url', '');
+                $ssNode->is_subscribe = $request->get('is_subscribe', 1);
                 $ssNode->compatible = $request->get('compatible', 0);
                 $ssNode->single = $request->get('single', 0);
                 $ssNode->single_force = $request->get('single') ? $request->get('single_force') : 0;
@@ -516,8 +581,9 @@ class AdminController extends Controller
             $bandwidth = $request->get('bandwidth');
             $traffic = $request->get('traffic');
             $monitor_url = $request->get('monitor_url');
+            $is_subscribe = $request->get('is_subscribe', 1);
             $compatible = $request->get('compatible');
-            $single = $request->get('single');
+            $single = $request->get('single', 0);
             $single_force = $request->get('single_force');
             $single_port = $request->get('single_port');
             $single_passwd = $request->get('single_passwd');
@@ -554,6 +620,7 @@ class AdminController extends Controller
                     'bandwidth'       => $bandwidth,
                     'traffic'         => $traffic,
                     'monitor_url'     => $monitor_url,
+                    'is_subscribe'    => $is_subscribe,
                     'compatible'      => $compatible,
                     'single'          => $single,
                     'single_force'    => $single ? $single_force : 0,
@@ -698,7 +765,7 @@ class AdminController extends Controller
     // 文章列表
     public function articleList(Request $request)
     {
-        $view['articleList'] = Article::query()->where('is_del', 0)->orderBy('sort', 'desc')->paginate(10)->appends($request->except('page'));
+        $view['articleList'] = Article::query()->where('is_del', 0)->orderBy('sort', 'desc')->paginate(15)->appends($request->except('page'));
 
         return Response::view('admin/articleList', $view);
     }
@@ -771,7 +838,7 @@ class AdminController extends Controller
     // 节点分组列表
     public function groupList(Request $request)
     {
-        $view['groupList'] = SsGroup::query()->paginate(10)->appends($request->except('page'));
+        $view['groupList'] = SsGroup::query()->paginate(15)->appends($request->except('page'));
 
         $level_list = $this->levelList();
         $level_dict = [];
@@ -1145,7 +1212,7 @@ class AdminController extends Controller
             return Redirect::to('admin/userList');
         }
 
-        $nodeList = SsNode::query()->where('status', 1)->paginate(10)->appends($request->except('page'));
+        $nodeList = SsNode::query()->where('status', 1)->paginate(15)->appends($request->except('page'));
         foreach ($nodeList as &$node) {
             // 获取分组名称
             $group = SsGroup::query()->where('id', $node->group_id)->first();
@@ -1194,6 +1261,7 @@ class AdminController extends Controller
         }
 
         $view['nodeList'] = $nodeList;
+        $view['user'] = $user;
 
         return Response::view('admin/export', $view);
     }
@@ -1363,12 +1431,12 @@ class AdminController extends Controller
         }
 
         $config = SsConfig::query()->where('id', $id)->first();
-        if (empty($config)) {
+        if (!$config) {
             return Response::json(['status' => 'fail', 'data' => '', 'message' => '配置不存在']);
         }
 
         // 去除该配置所属类型的默认值
-        SsConfig::query()->where('type', $config->type)->update(['is_default' => 0]);
+        SsConfig::query()->where('type', $config->type)->where('is_default', 1)->update(['is_default' => 0]);
 
         // 将该ID对应记录值置为默认值
         SsConfig::query()->where('id', $id)->update(['is_default' => 1]);
@@ -1720,7 +1788,7 @@ class AdminController extends Controller
     // 邀请码列表
     public function inviteList(Request $request)
     {
-        $view['inviteList'] = Invite::query()->with(['generator', 'user'])->orderBy('status', 'asc')->orderBy('id', 'desc')->paginate(10)->appends($request->except('page'));
+        $view['inviteList'] = Invite::query()->with(['generator', 'user'])->orderBy('status', 'asc')->orderBy('id', 'desc')->paginate(15)->appends($request->except('page'));
 
         return Response::view('admin/inviteList', $view);
     }
@@ -1783,7 +1851,7 @@ class AdminController extends Controller
             $query->where('status', $status);
         }
 
-        $view['applyList'] = $query->orderBy('id', 'desc')->paginate(10)->appends($request->except('page'));
+        $view['applyList'] = $query->orderBy('id', 'desc')->paginate(15)->appends($request->except('page'));
 
         return Response::view('admin/applyList', $view);
     }
@@ -1797,11 +1865,7 @@ class AdminController extends Controller
         $apply = ReferralApply::query()->with(['user'])->where('id', $id)->first();
         if ($apply && $apply->link_logs) {
             $link_logs = explode(',', $apply->link_logs);
-            $list = ReferralLog::query()->whereIn('id', $link_logs)->with('user')->paginate(10);
-        }
-
-        foreach ($list as &$vo) {
-            $vo->goods = OrderGoods::query()->where('oid', $vo->order_id)->with('goods')->first();
+            $list = ReferralLog::query()->with(['user', 'order.goods'])->whereIn('id', $link_logs)->paginate(15);
         }
 
         $view['info'] = $apply;
@@ -1847,7 +1911,7 @@ class AdminController extends Controller
             $query->where('status', $status);
         }
 
-        $view['orderList'] = $query->paginate(10);
+        $view['orderList'] = $query->paginate(15);
 
         return Response::view('admin/orderList', $view);
     }
@@ -1942,7 +2006,7 @@ class AdminController extends Controller
             });
         }
 
-        $view['list'] = $query->paginate(10);
+        $view['list'] = $query->paginate(15);
 
         return Response::view('admin/userBalanceLogList', $view);
     }
@@ -1960,7 +2024,7 @@ class AdminController extends Controller
             });
         }
 
-        $view['list'] = $query->paginate(10);
+        $view['list'] = $query->paginate(15);
 
         return Response::view('admin/userBanLogList', $view);
     }
@@ -1985,7 +2049,7 @@ class AdminController extends Controller
     // 标签列表
     public function labelList(Request $request)
     {
-        $labelList = Label::query()->paginate(10);
+        $labelList = Label::query()->paginate(15);
         foreach ($labelList as $label) {
             $label->userCount = UserLabel::query()->where('label_id', $label->id)->groupBy('label_id')->count();
             $label->nodeCount = SsNodeLabel::query()->where('label_id', $label->id)->groupBy('label_id')->count();

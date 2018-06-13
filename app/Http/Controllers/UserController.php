@@ -7,6 +7,7 @@ use App\Http\Models\Article;
 use App\Http\Models\Coupon;
 use App\Http\Models\CouponLog;
 use App\Http\Models\Goods;
+use App\Http\Models\GoodsLabel;
 use App\Http\Models\Invite;
 use App\Http\Models\Level;
 use App\Http\Models\Order;
@@ -633,9 +634,7 @@ class UserController extends Controller
             $transfer_enable = self::$config['referral_traffic'] * 1048576;
 
             User::query()->where('id', $verify->user->referral_uid)->increment('transfer_enable', $transfer_enable);
-
-            // TODO：写入流量增加日志
-
+            User::query()->where('id', $verify->user->referral_uid)->update(['enable' => 1]);
         }
 
         $request->session()->flash('successMsg', '账号激活成功');
@@ -829,9 +828,23 @@ class UserController extends Controller
         $user = $request->session()->get('user');
 
         if ($request->method() == 'POST') {
-            $goods = Goods::query()->where('id', $goods_id)->where('status', 1)->first();
+            $goods = Goods::query()->with(['label'])->where('id', $goods_id)->where('is_del', 0)->where('status', 1)->first();
             if (empty($goods)) {
                 return Response::json(['status' => 'fail', 'data' => '', 'message' => '支付失败：商品或服务已下架']);
+            }
+
+            // 检查配置是否启用了限购：all-所有商品限购, free-价格为0的商品限购, none-不限购（默认）
+            if (!isset(self::$config['goods_purchase_limit_strategy'])) {
+                self::$config['goods_purchase_limit_strategy'] = 'none';
+            }
+
+            $strategy = self::$config['goods_purchase_limit_strategy'];
+            if ($strategy == 'all' || ($strategy == 'free' && $goods->price == 0)) {
+                // 判断是否已经购买过该商品
+                $none_expire_good_exist = Order::query()->where('user_id', $user['id'])->where('goods_id', $goods_id)->where('is_expire', 0)->exists();
+                if ($none_expire_good_exist) {
+                    return Response::json(['status' => 'fail', 'data' => '', 'message' => '支付失败：商品不可重复购买']);
+                }
             }
 
             // 使用优惠券
@@ -842,7 +855,7 @@ class UserController extends Controller
                 }
 
                 // 计算实际应支付总价
-                $amount = $coupon->type == 2 ? $goods->price * $coupon->discount : $goods->price - $coupon->amount;
+                $amount = $coupon->type == 2 ? $goods->price * $coupon->discount / 10 : $goods->price - $coupon->amount;
                 $amount = $amount > 0 ? $amount : 0;
             } else {
                 $amount = $goods->price;
@@ -899,7 +912,7 @@ class UserController extends Controller
                     $couponLog->save();
                 }
 
-                // 如果买的是套餐，则先将之前购买的所有套餐置都无效，并扣掉之前所有套餐的流量
+                // 如果买的是套餐，则先将之前购买的所有套餐置都无效，并扣掉之前所有套餐的流量，并移除之前所有套餐的标签
                 if ($goods->type == 2) {
                     $existOrderList = Order::query()->with('goods')->whereHas('goods', function ($q) {
                         $q->where('type', 2);
@@ -907,6 +920,8 @@ class UserController extends Controller
                     foreach ($existOrderList as $vo) {
                         Order::query()->where('oid', $vo->oid)->update(['is_expire' => 1]);
                         User::query()->where('id', $user->id)->decrement('transfer_enable', $vo->goods->traffic * 1048576);
+
+                        //todo：移除之前套餐的标签（需要注意：有些套餐和流量包用同一个标签，所以移除完套餐的标签后需要补齐流量包的标签）
                     }
 
                     // 重置已用流量
@@ -924,6 +939,25 @@ class UserController extends Controller
                     $lastCanUseDays = floor(round(strtotime($user->expire_time) - strtotime(date('Y-m-d H:i:s'))) / 3600 / 24);
                     if ($lastCanUseDays < $goods->days) {
                         User::query()->where('id', $user->id)->update(['expire_time' => date('Y-m-d', strtotime("+" . $goods->days . " days")), 'enable' => 1]);
+                    }
+                }
+
+                // 写入用户标签
+                if ($goods->label) {
+                    // 取出现有的标签
+                    $userLabels = UserLabel::query()->where('user_id', $user->id)->pluck('label_id')->toArray();
+                    $goodsLabels = GoodsLabel::query()->where('goods_id', $goods_id)->pluck('label_id')->toArray();
+                    $newUserLabels = array_merge($userLabels, $goodsLabels);
+
+                    // 删除用户所有标签
+                    UserLabel::query()->where('user_id', $user->id)->delete();
+
+                    // 生成标签
+                    foreach ($newUserLabels as $vo) {
+                        $obj = new UserLabel();
+                        $obj->user_id = $user->id;
+                        $obj->label_id = $vo;
+                        $obj->save();
                     }
                 }
 
@@ -950,7 +984,7 @@ class UserController extends Controller
                 return Response::json(['status' => 'fail', 'data' => '', 'message' => '支付失败：' . $e->getMessage()]);
             }
         } else {
-            $goods = Goods::query()->where('id', $goods_id)->where('status', 1)->first();
+            $goods = Goods::query()->where('id', $goods_id)->where('is_del', 0)->where('status', 1)->first();
             if (empty($goods)) {
                 return Redirect::to('user/goodsList');
             }
@@ -1085,7 +1119,7 @@ class UserController extends Controller
 
         $view['website_analytics'] = self::$config['website_analytics'];
         $view['website_customer_service'] = self::$config['website_customer_service'];
-        $view['subscribe_status'] = $subscribe->status;
+        $view['subscribe_status'] = !$subscribe ? 1 : $subscribe->status;
         $view['link'] = self::$config['subscribe_domain'] ? self::$config['subscribe_domain'] . '/s/' . $code : self::$config['website_url'] . '/s/' . $code;
 
         return Response::view('/user/subscribe', $view);
